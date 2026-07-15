@@ -1,0 +1,6 @@
+backend_/.env
+backend_/__pycache__/
+backend_/routers/__pycache__/
+backend_/tests/__pycache__/
+*.pyc
+*.log

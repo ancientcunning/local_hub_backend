@@ -1,66 +1,57 @@
+import asyncio
 import json
 import os
-from typing import List
-from fastapi import APIRouter, Query
-from pydantic import BaseModel
+from fastapi import APIRouter
+from tourapi_client import call_tourapi
 
 router = APIRouter()
 
+DATA_PATH = os.path.join(
+    os.path.dirname(__file__), "..", "data", "부산_축제공연행사.json"
+)
 
-class FestivalItem(BaseModel):
-    title: str
-    addr1: str | None = None
-    contentid: str | None = None
-    eventstartdate: str | None = None
-    eventenddate: str | None = None
+_cache = None
+_cache_lock = asyncio.Lock()
+_request_semaphore = asyncio.Semaphore(10)
 
 
-@router.get("/", response_model=List[FestivalItem])
-def get_festivals(
-    start_date: str | None = Query(default=None),
-    end_date: str | None = Query(default=None),
-):
-    data_path = os.path.join(os.path.dirname(__file__), '..', '..', 'frontend', 'public', '부산', '부산_축제공연행사.json')
-    with open(data_path, 'r', encoding='utf-8') as f:
+async def enrich_festival(item: dict) -> dict:
+    try:
+        async with _request_semaphore:
+            intro = await call_tourapi("detailIntro2", contentId=item.get("contentid"), contentTypeId="15")
+    except Exception:
+        intro = None
+    intro = intro or {}
+
+    return {
+        "contentid": item.get("contentid"),
+        "title": item.get("title"),
+        "addr1": item.get("addr1"),
+        "image": item.get("firstimage") or item.get("firstimage2"),
+        "tel": item.get("tel"),
+        "mapx": item.get("mapx"),
+        "mapy": item.get("mapy"),
+        "eventstartdate": intro.get("eventstartdate") or None,
+        "eventenddate": intro.get("eventenddate") or None,
+        "eventplace": intro.get("eventplace") or None,
+    }
+
+
+async def build_festival_list():
+    with open(DATA_PATH, "r", encoding="utf-8") as f:
         data = json.load(f)
 
-    items = data.get('items', [])
+    items = data.get("items", [])
+    results = await asyncio.gather(*(enrich_festival(item) for item in items))
+    # 실제 축제 기간 정보(eventstartdate)가 있는 항목만 캘린더에 의미가 있다.
+    return [r for r in results if r["eventstartdate"]]
 
-    if start_date and end_date:
-        filtered = []
-        for item in items:
-            item_start = item.get('eventstartdate', '')
-            item_end = item.get('eventenddate', '')
-            if not item_start and not item_end:
-                filtered.append(item)
-                continue
-            if item_start and item_end and start_date <= item_end and end_date >= item_start:
-                filtered.append(item)
-            elif item_start and start_date <= item_start <= end_date:
-                filtered.append(item)
-            elif item_end and start_date <= item_end <= end_date:
-                filtered.append(item)
-        items = filtered
 
-    if not items:
-        return [
-            FestivalItem(
-                title=item.get('title', ''),
-                addr1=item.get('addr1'),
-                contentid=item.get('contentid'),
-                eventstartdate=item.get('eventstartdate'),
-                eventenddate=item.get('eventenddate'),
-            )
-            for item in data.get('items', [])[:10]
-        ]
-
-    return [
-        FestivalItem(
-            title=item.get('title', ''),
-            addr1=item.get('addr1'),
-            contentid=item.get('contentid'),
-            eventstartdate=item.get('eventstartdate'),
-            eventenddate=item.get('eventenddate'),
-        )
-        for item in items[:30]
-    ]
+@router.get("/")
+async def get_festivals():
+    global _cache
+    if _cache is None:
+        async with _cache_lock:
+            if _cache is None:
+                _cache = await build_festival_list()
+    return _cache
